@@ -4,7 +4,8 @@ import {
   Edit2, ChevronRight, User, CreditCard, PlusCircle, Camera, Upload,
   FileText, MessageSquare, CheckCircle2, Tag, AlertCircle, Calendar,
   Music, ChevronDown, Info, DollarSign, Clock, RotateCcw, LogOut,
-  Phone, Search, QrCode, TrendingUp, History
+  Phone, Search, QrCode, TrendingUp, History, FlaskConical, Layers,
+  Package, Hash, Receipt, CreditCard as CardIcon, ArrowDownToLine
 } from 'lucide-react';
 import QRCode from 'react-qr-code';
 import jsPDF from 'jspdf';
@@ -33,7 +34,9 @@ export default function App() {
   const [events,    setEvents]    = useState([]);
   const [styles,    setStyles]    = useState(INITIAL_STYLES);
   const [prices,    setPrices]    = useState([]);
-  const [settings,  setSettings]  = useState({ providerName: 'Cerveza Brauers', aliasInfo: '' });
+  const [settings,  setSettings]  = useState({ providerName: 'Cerveza Brauers', aliasInfo: '', accountHolder: '' });
+  const [bajadas,   setBajadas]   = useState([]);
+  const [produccion,setProduccion]= useState([]);
 
   // ── LOGO: sigue en localStorage (por dispositivo, no se sincroniza) ────────
   const [logoUrl, setLogoUrl] = useState(() => localStorage.getItem('brauers_logo') || null);
@@ -80,6 +83,12 @@ export default function App() {
   const [qrKeg,                 setQrKeg]                 = useState(null);
   const [movements,             setMovements]             = useState([]);
   const [showMovements,         setShowMovements]         = useState(false);
+  const [selectedBajada,        setSelectedBajada]        = useState(null);
+  const [stockSubTab,           setStockSubTab]           = useState('kegs');
+  const [bulkMode,              setBulkMode]              = useState(false);
+  const [bulkKeg,               setBulkKeg]              = useState({ prefix: 'B', capacity: '', quantity: '' });
+  const [showAddProduccion,     setShowAddProduccion]     = useState(false);
+  const [newProduccion,         setNewProduccion]         = useState({ style: '', liters: '', stage: 'fermentando', date: '', notes: '' });
 
   const settingsTimerRef = useRef(null);
 
@@ -100,8 +109,8 @@ export default function App() {
     if (!user) {
       setKegs([]); setLocations([]); setEvents([]);
       setStyles(INITIAL_STYLES); setPrices([]);
-      setSettings({ providerName: 'Cerveza Brauers', aliasInfo: '' });
-      setMovements([]);
+      setSettings({ providerName: 'Cerveza Brauers', aliasInfo: '', accountHolder: '' });
+      setMovements([]); setBajadas([]); setProduccion([]);
       return;
     }
 
@@ -124,16 +133,13 @@ export default function App() {
       snap => {
         if (snap.exists()) {
           const d = snap.data();
-          setSettings({ providerName: d.providerName || 'Cerveza Brauers', aliasInfo: d.aliasInfo || '' });
+          setSettings({ providerName: d.providerName || 'Cerveza Brauers', aliasInfo: d.aliasInfo || '', accountHolder: d.accountHolder || '' });
           setStyles(d.styles || INITIAL_STYLES);
           setPrices(d.prices || []);
         } else {
-          // Primera vez: inicializar config con defaults
           setDoc(doc(db, 'users', uid, 'config', 'main'), {
-            providerName: 'Cerveza Brauers',
-            aliasInfo: '',
-            styles: INITIAL_STYLES,
-            prices: []
+            providerName: 'Cerveza Brauers', aliasInfo: '', accountHolder: '',
+            styles: INITIAL_STYLES, prices: []
           });
         }
       }
@@ -143,8 +149,16 @@ export default function App() {
       query(collection(db, 'users', uid, 'movements'), orderBy('createdAt', 'desc'), limit(30)),
       snap => setMovements(snap.docs.map(d => ({ id: d.id, ...d.data() })))
     );
+    const unsubBajadas = onSnapshot(
+      query(collection(db, 'users', uid, 'bajadas'), orderBy('createdAt', 'desc'), limit(50)),
+      snap => setBajadas(snap.docs.map(d => ({ id: d.id, ...d.data() })))
+    );
+    const unsubProduccion = onSnapshot(
+      collection(db, 'users', uid, 'produccion'),
+      snap => setProduccion(snap.docs.map(d => ({ id: d.id, ...d.data() })))
+    );
 
-    return () => { unsubKegs(); unsubLocs(); unsubEvents(); unsubConfig(); unsubMovements(); };
+    return () => { unsubKegs(); unsubLocs(); unsubEvents(); unsubConfig(); unsubMovements(); unsubBajadas(); unsubProduccion(); };
   }, [user]);
 
   // ── AUTH HANDLERS ─────────────────────────────────────────────────────────
@@ -183,7 +197,8 @@ export default function App() {
     settingsTimerRef.current = setTimeout(() => {
       updateDoc(configRef(), {
         providerName: newSettings.providerName,
-        aliasInfo: newSettings.aliasInfo
+        aliasInfo: newSettings.aliasInfo,
+        accountHolder: newSettings.accountHolder
       }).catch(() => {});
     }, 800);
   };
@@ -249,6 +264,31 @@ export default function App() {
     setShowAddKeg(false);
   };
 
+  const addBulkKegs = async () => {
+    const { prefix, capacity, quantity } = bulkKeg;
+    if (!prefix.trim() || !capacity || !quantity || Number(quantity) < 1) return;
+    const pfx = prefix.trim().toUpperCase();
+    // Find max existing sequence for this prefix
+    const existing = kegs
+      .filter(k => k.code.startsWith(pfx + '-'))
+      .map(k => {
+        const num = parseInt(k.code.replace(pfx + '-', ''), 10);
+        return isNaN(num) ? 0 : num;
+      });
+    let maxSeq = existing.length > 0 ? Math.max(...existing) : 0;
+    const qty = Math.min(Number(quantity), 100); // safety cap
+    for (let i = 0; i < qty; i++) {
+      maxSeq++;
+      const code = `${pfx}-${String(maxSeq).padStart(3, '0')}`;
+      await addDoc(collection(db, 'users', user.uid, 'kegs'), {
+        code, capacity: Number(capacity), status: 'almacen', locationId: null, deliveredAt: null
+      });
+    }
+    setBulkKeg({ prefix: 'B', capacity: '', quantity: '' });
+    setBulkMode(false);
+    setShowAddKeg(false);
+  };
+
   const deleteKeg = (kegId) =>
     deleteDoc(doc(db, 'users', user.uid, 'kegs', kegId));
 
@@ -304,6 +344,19 @@ export default function App() {
         });
       }
     }
+    // Save bajada record
+    const dest2 = allDestinations.find(l => l.id === wppData.locationId);
+    await addDoc(collection(db, 'users', user.uid, 'bajadas'), {
+      destinationId: wppData.locationId,
+      destinationName: dest2?.name || 'Desconocido',
+      date: wppData.date,
+      items: wppData.items.map(item => {
+        const keg = kegs.find(k => k.id === item.kegId);
+        return { kegId: item.kegId, kegCode: keg?.code || '---', kegCapacity: keg?.capacity || 0, style: item.style, price: Number(item.price) || 0 };
+      }),
+      total: wppData.items.reduce((s, i) => s + (Number(i.price) || 0), 0),
+      createdAt: new Date().toISOString()
+    });
     setWppData({ ...wppData, items: [] });
     setStatusFilter(null);
   };
@@ -349,6 +402,24 @@ export default function App() {
     localStorage.setItem(`brauers_onboarding_${user.uid}`, '1');
     setShowOnboarding(false);
   };
+
+  // ── PRODUCCIÓN ───────────────────────────────────────────────────────────
+  const addProduccion = async () => {
+    const { style, liters, stage, date, notes } = newProduccion;
+    if (!style || !liters || !stage) return;
+    await addDoc(collection(db, 'users', user.uid, 'produccion'), {
+      style, liters: Number(liters), stage, date, notes: notes || '',
+      createdAt: new Date().toISOString()
+    });
+    setNewProduccion({ style: '', liters: '', stage: 'fermentando', date: '', notes: '' });
+    setShowAddProduccion(false);
+  };
+
+  const removeProduccion = (id) =>
+    deleteDoc(doc(db, 'users', user.uid, 'produccion', id));
+
+  const updateProduccionStage = (id, stage) =>
+    updateDoc(doc(db, 'users', user.uid, 'produccion', id), { stage });
 
   // ── LOGO ──────────────────────────────────────────────────────────────────
   const handleImageUpload = (e) => {
@@ -401,7 +472,11 @@ export default function App() {
       total += p;
       return `Barril de ${keg?.capacity || '??'}L ${item.style || 'CERVEZA'} (${destType}) $${p.toLocaleString('es-AR')}`;
     }).join('\n');
-    return `Local/Evento: *${bar}*\nProveedor: *${settings.providerName}*\n\nBajada del ${date}:\n${itemsStr}\n\nTotal: $${total.toLocaleString('es-AR')}\n\nAlias: ${settings.aliasInfo}`;
+    const paymentLine = [
+      settings.aliasInfo ? `Alias: ${settings.aliasInfo}` : null,
+      settings.accountHolder ? `Titular: ${settings.accountHolder}` : null
+    ].filter(Boolean).join('\n');
+    return `Local/Evento: *${bar}*\nProveedor: *${settings.providerName}*\n\nBajada del ${date}:\n${itemsStr}\n\nTotal: $${total.toLocaleString('es-AR')}${paymentLine ? '\n\n' + paymentLine : ''}`;
   };
 
   const handleCopyMessage = () => {
@@ -456,7 +531,11 @@ export default function App() {
       const price = type === 'bar' ? p.priceBar : p.priceEvent;
       return `Barril de ${p.capacity}L ${p.style} → $${price.toLocaleString('es-AR')}`;
     }).join('\n');
-    return `🍺 *${settings.providerName} — Precios ${label}*\n\n${items}\n\n💳 Alias: ${settings.aliasInfo}`;
+    const payInfo = [
+      settings.aliasInfo ? `💳 Alias: ${settings.aliasInfo}` : null,
+      settings.accountHolder ? `👤 Titular: ${settings.accountHolder}` : null
+    ].filter(Boolean).join('\n');
+    return `🍺 *${settings.providerName} — Precios ${label}*\n\n${items}${payInfo ? '\n\n' + payInfo : ''}`;
   };
 
   const handleCopyPriceList = (type) => {
@@ -503,7 +582,7 @@ export default function App() {
         y += 13;
       });
       pdf.setFontSize(9); pdf.setFont('helvetica', 'normal'); pdf.setTextColor(120, 120, 120);
-      pdf.text(`Alias de pago: ${settings.aliasInfo}`, 20, y + 16);
+      pdf.text(`Alias: ${settings.aliasInfo}${settings.accountHolder ? '   Titular: ' + settings.accountHolder : ''}`, 20, y + 16);
       const fileName = `precios-${type === 'bar' ? 'bares' : 'eventos'}.pdf`;
       const blob = pdf.output('blob');
       if (navigator.share && navigator.canShare) {
@@ -621,7 +700,8 @@ export default function App() {
           <div className="bg-gray-100 p-6 rounded-2xl">
             <span className="text-[10px] font-black uppercase text-gray-400 block mb-2 tracking-widest">Emisor</span>
             <p className="font-black text-lg uppercase italic">{settings.providerName}</p>
-            <p className="text-sm font-bold text-gray-600 mt-1">CBU/Alias: {settings.aliasInfo}</p>
+            {settings.aliasInfo && <p className="text-sm font-bold text-gray-600 mt-1">Alias: {settings.aliasInfo}</p>}
+            {settings.accountHolder && <p className="text-sm font-bold text-gray-600">Titular: {settings.accountHolder}</p>}
           </div>
           <div className="bg-gray-100 p-6 rounded-2xl border-l-4 border-red-600">
             <span className="text-[10px] font-black uppercase text-gray-400 block mb-2 tracking-widest">Cliente / Destino</span>
@@ -876,6 +956,41 @@ export default function App() {
                     >
                       Finalizar y descontar stock
                     </button>
+                  </div>
+                )}
+              </div>
+
+              {/* HISTORIAL DE BAJADAS */}
+              <div>
+                <div className="flex items-center space-x-2 mb-4 ml-2">
+                  <div className="w-1.5 h-6 bg-gray-300 rounded-full"></div>
+                  <h2 className="text-xl font-black text-gray-900 uppercase tracking-tighter">Historial</h2>
+                </div>
+                {bajadas.length === 0 ? (
+                  <div className="bg-white p-6 rounded-[28px] shadow-sm border border-gray-100 text-center space-y-2">
+                    <History size={28} className="mx-auto text-gray-200" />
+                    <p className="text-[10px] font-black uppercase text-gray-400">Sin bajadas registradas</p>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {bajadas.map(b => (
+                      <button key={b.id} onClick={() => setSelectedBajada(b)}
+                        className="w-full bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex items-center justify-between active:scale-[0.98] transition-transform">
+                        <div className="flex items-center space-x-3 min-w-0">
+                          <div className="w-10 h-10 bg-gray-100 rounded-xl flex items-center justify-center shrink-0">
+                            <Receipt size={16} className="text-gray-600" />
+                          </div>
+                          <div className="text-left min-w-0">
+                            <p className="font-black text-sm text-gray-900 truncate">{b.destinationName}</p>
+                            <p className="text-[10px] text-gray-400 font-bold">{b.date?.split('-').reverse().join('/')} · {b.items?.length || 0} barril(es)</p>
+                          </div>
+                        </div>
+                        <div className="text-right shrink-0 ml-2">
+                          <p className="font-black text-sm text-gray-900">${b.total?.toLocaleString('es-AR')}</p>
+                          <ChevronRight size={14} className="text-gray-300 ml-auto mt-0.5" />
+                        </div>
+                      </button>
+                    ))}
                   </div>
                 )}
               </div>
@@ -1170,9 +1285,24 @@ export default function App() {
           {activeTab === 'kegs' && (
             <div className="pt-4 space-y-3 animate-in fade-in slide-in-from-right-4 duration-300 pb-24">
               <div className="flex justify-between items-center px-2">
-                <h2 className="text-xl font-black uppercase tracking-tighter">Stock de Barriles</h2>
-                <button onClick={() => setShowAddKeg(true)} className="bg-black text-white p-2.5 rounded-xl active:scale-90 shadow-lg"><Plus size={20} /></button>
+                <h2 className="text-xl font-black uppercase tracking-tighter">Stock</h2>
+                <button onClick={() => { setShowAddKeg(!showAddKeg); setBulkMode(false); }} className="bg-black text-white p-2.5 rounded-xl active:scale-90 shadow-lg"><Plus size={20} /></button>
               </div>
+
+              {/* SUB-TABS */}
+              <div className="flex bg-gray-100 rounded-2xl p-1">
+                <button onClick={() => setStockSubTab('kegs')}
+                  className={`flex-1 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${stockSubTab === 'kegs' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-400'}`}>
+                  Barriles ({kegs.length})
+                </button>
+                <button onClick={() => setStockSubTab('produccion')}
+                  className={`flex-1 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${stockSubTab === 'produccion' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-400'}`}>
+                  Producción ({produccion.length})
+                </button>
+              </div>
+
+              {/* ── SUB-TAB BARRILES ── */}
+              {stockSubTab === 'kegs' && (<>
 
               {/* BUSCADOR */}
               <div className="flex items-center space-x-2 bg-gray-50 border border-gray-200 rounded-2xl px-4 py-3">
@@ -1193,26 +1323,87 @@ export default function App() {
               {showAddKeg && (
                 <div className="bg-gray-900 p-6 rounded-[32px] text-white space-y-4 animate-in slide-in-from-top-4 duration-300 shadow-2xl">
                   <div className="flex justify-between items-center">
-                    <span className="text-[10px] font-black uppercase tracking-widest text-red-500">Nuevo Barril</span>
-                    <button onClick={() => setShowAddKeg(false)} className="hover:text-red-500 transition-colors"><X size={18} /></button>
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-1">
-                      <label className="text-[8px] font-black uppercase text-gray-500 ml-1">Código</label>
-                      <input type="text" placeholder="B-00X"
-                        className="w-full bg-white/10 border border-white/20 rounded-xl p-3 text-sm font-black uppercase outline-none focus:border-red-600"
-                        value={newKeg.code} onChange={e => setNewKeg({ ...newKeg, code: e.target.value })} />
+                    <div className="flex space-x-1 bg-white/10 rounded-xl p-1">
+                      <button onClick={() => setBulkMode(false)}
+                        className={`px-4 py-1.5 rounded-lg text-[9px] font-black uppercase transition-all ${!bulkMode ? 'bg-white text-gray-900' : 'text-gray-500'}`}>
+                        Individual
+                      </button>
+                      <button onClick={() => setBulkMode(true)}
+                        className={`px-4 py-1.5 rounded-lg text-[9px] font-black uppercase transition-all ${bulkMode ? 'bg-red-600 text-white' : 'text-gray-500'}`}>
+                        Por Cantidad
+                      </button>
                     </div>
-                    <div className="space-y-1">
-                      <label className="text-[8px] font-black uppercase text-gray-500 ml-1">Capacidad (L)</label>
-                      <input type="number" placeholder="Ej: 50"
-                        className="w-full bg-white/10 border border-white/20 rounded-xl p-3 text-sm font-black outline-none focus:border-red-600"
-                        value={newKeg.capacity} onChange={e => setNewKeg({ ...newKeg, capacity: e.target.value })} />
-                    </div>
+                    <button onClick={() => { setShowAddKeg(false); setBulkMode(false); }} className="hover:text-red-500 transition-colors"><X size={18} /></button>
                   </div>
-                  <button onClick={addNewKeg} className="w-full py-4 bg-red-600 rounded-2xl font-black uppercase text-xs tracking-widest active:scale-95 transition-transform">
-                    Agregar al Inventario
-                  </button>
+
+                  {!bulkMode ? (
+                    <>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div className="space-y-1">
+                          <label className="text-[8px] font-black uppercase text-gray-500 ml-1">Código</label>
+                          <input type="text" placeholder="B-001"
+                            className="w-full bg-white/10 border border-white/20 rounded-xl p-3 text-sm font-black uppercase outline-none focus:border-red-600"
+                            value={newKeg.code} onChange={e => setNewKeg({ ...newKeg, code: e.target.value })} />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-[8px] font-black uppercase text-gray-500 ml-1">Capacidad (L)</label>
+                          <select className="w-full bg-white/10 border border-white/20 rounded-xl p-3 text-sm font-black outline-none focus:border-red-600 text-white"
+                            value={newKeg.capacity} onChange={e => setNewKeg({ ...newKeg, capacity: e.target.value })}>
+                            <option value="" className="text-black bg-white">Litros...</option>
+                            {[10, 20, 25, 30, 50, 60].map(l => <option key={l} value={l} className="text-black bg-white">{l}L</option>)}
+                          </select>
+                        </div>
+                      </div>
+                      <button onClick={addNewKeg} className="w-full py-4 bg-red-600 rounded-2xl font-black uppercase text-xs tracking-widest active:scale-95 transition-transform">
+                        Agregar al Inventario
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-3 gap-3">
+                          <div className="space-y-1">
+                            <label className="text-[8px] font-black uppercase text-gray-500 ml-1">Prefijo</label>
+                            <input type="text" placeholder="B" maxLength={4}
+                              className="w-full bg-white/10 border border-white/20 rounded-xl p-3 text-sm font-black uppercase outline-none focus:border-red-600 text-center"
+                              value={bulkKeg.prefix} onChange={e => setBulkKeg({ ...bulkKeg, prefix: e.target.value })} />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-[8px] font-black uppercase text-gray-500 ml-1">Capacidad</label>
+                            <select className="w-full bg-white/10 border border-white/20 rounded-xl p-3 text-sm font-black outline-none text-white"
+                              value={bulkKeg.capacity} onChange={e => setBulkKeg({ ...bulkKeg, capacity: e.target.value })}>
+                              <option value="" className="text-black bg-white">L...</option>
+                              {[10, 20, 25, 30, 50, 60].map(l => <option key={l} value={l} className="text-black bg-white">{l}L</option>)}
+                            </select>
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-[8px] font-black uppercase text-gray-500 ml-1">Cantidad</label>
+                            <input type="number" placeholder="10" min="1" max="100"
+                              className="w-full bg-white/10 border border-white/20 rounded-xl p-3 text-sm font-black outline-none focus:border-red-600 text-center"
+                              value={bulkKeg.quantity} onChange={e => setBulkKeg({ ...bulkKeg, quantity: e.target.value })} />
+                          </div>
+                        </div>
+                        {bulkKeg.prefix && bulkKeg.capacity && bulkKeg.quantity && (
+                          <div className="bg-black/40 rounded-xl p-3 border border-white/10">
+                            <p className="text-[8px] font-black uppercase text-gray-500 mb-1">Vista previa</p>
+                            <p className="text-xs font-bold text-gray-300">
+                              {(() => {
+                                const pfx = bulkKeg.prefix.toUpperCase();
+                                const existing = kegs.filter(k => k.code.startsWith(pfx + '-')).map(k => parseInt(k.code.replace(pfx + '-', ''), 10)).filter(n => !isNaN(n));
+                                const start = (existing.length > 0 ? Math.max(...existing) : 0) + 1;
+                                const end = start + Number(bulkKeg.quantity) - 1;
+                                return `${pfx}-${String(start).padStart(3, '0')} → ${pfx}-${String(end).padStart(3, '0')} · ${bulkKeg.capacity}L cada uno`;
+                              })()}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                      <button onClick={addBulkKegs} className="w-full py-4 bg-red-600 rounded-2xl font-black uppercase text-xs tracking-widest active:scale-95 transition-transform flex items-center justify-center space-x-2">
+                        <Package size={16} />
+                        <span>Cargar {bulkKeg.quantity || '0'} Barriles</span>
+                      </button>
+                    </>
+                  )}
                 </div>
               )}
 
@@ -1282,6 +1473,118 @@ export default function App() {
                   </div>
                 )}
               </div>
+              </>)}
+
+              {/* ── SUB-TAB PRODUCCIÓN ── */}
+              {stockSubTab === 'produccion' && (<>
+                <button onClick={() => setShowAddProduccion(v => !v)}
+                  className="w-full py-3 bg-black text-white rounded-2xl font-black uppercase text-[10px] tracking-widest flex items-center justify-center space-x-2 active:scale-95 shadow-lg">
+                  <FlaskConical size={16} />
+                  <span>{showAddProduccion ? 'Cancelar' : 'Registrar Lote'}</span>
+                </button>
+
+                {showAddProduccion && (
+                  <div className="bg-gray-900 p-5 rounded-[28px] text-white space-y-3 animate-in slide-in-from-top-4 duration-300 shadow-2xl">
+                    <span className="text-[9px] font-black uppercase tracking-widest text-red-500">Nuevo Lote</span>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-1 col-span-2">
+                        <label className="text-[8px] font-black uppercase text-gray-500 ml-1">Estilo</label>
+                        <select className="w-full bg-white/10 border border-white/20 rounded-xl p-3 text-sm font-bold outline-none text-white"
+                          value={newProduccion.style} onChange={e => setNewProduccion({ ...newProduccion, style: e.target.value })}>
+                          <option value="" className="text-black bg-white">Estilo...</option>
+                          {styles.map(s => <option key={s} value={s} className="text-black bg-white">{s}</option>)}
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[8px] font-black uppercase text-gray-500 ml-1">Litros</label>
+                        <input type="number" placeholder="Ej: 300"
+                          className="w-full bg-white/10 border border-white/20 rounded-xl p-3 text-sm font-black outline-none focus:border-red-600"
+                          value={newProduccion.liters} onChange={e => setNewProduccion({ ...newProduccion, liters: e.target.value })} />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[8px] font-black uppercase text-gray-500 ml-1">Etapa</label>
+                        <select className="w-full bg-white/10 border border-white/20 rounded-xl p-3 text-sm font-bold outline-none text-white"
+                          value={newProduccion.stage} onChange={e => setNewProduccion({ ...newProduccion, stage: e.target.value })}>
+                          <option value="fermentando" className="text-black bg-white">Fermentando</option>
+                          <option value="madurando" className="text-black bg-white">Madurando</option>
+                          <option value="lista" className="text-black bg-white">Lista para despachar</option>
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[8px] font-black uppercase text-gray-500 ml-1">Fecha inicio</label>
+                        <input type="date"
+                          className="w-full bg-white/10 border border-white/20 rounded-xl p-3 text-sm font-bold outline-none focus:border-red-600 text-white"
+                          value={newProduccion.date} onChange={e => setNewProduccion({ ...newProduccion, date: e.target.value })} />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[8px] font-black uppercase text-gray-500 ml-1">Notas</label>
+                        <input type="text" placeholder="Opcional..."
+                          className="w-full bg-white/10 border border-white/20 rounded-xl p-3 text-sm font-bold outline-none focus:border-red-600"
+                          value={newProduccion.notes} onChange={e => setNewProduccion({ ...newProduccion, notes: e.target.value })} />
+                      </div>
+                    </div>
+                    <button onClick={addProduccion} className="w-full py-3 bg-red-600 rounded-2xl font-black uppercase text-xs tracking-widest active:scale-95">
+                      Guardar Lote
+                    </button>
+                  </div>
+                )}
+
+                {/* STAGES */}
+                {[
+                  { key: 'fermentando', label: 'Fermentando', color: 'text-amber-600', bg: 'bg-amber-50', dot: 'bg-amber-500' },
+                  { key: 'madurando',   label: 'Madurando',   color: 'text-blue-600',  bg: 'bg-blue-50',  dot: 'bg-blue-500' },
+                  { key: 'lista',       label: 'Lista para despachar', color: 'text-green-700', bg: 'bg-green-50', dot: 'bg-green-500' }
+                ].map(({ key, label, color, bg, dot }) => {
+                  const lotes = produccion.filter(p => p.stage === key);
+                  return (
+                    <div key={key}>
+                      <div className="flex items-center space-x-2 mb-2 px-1">
+                        <div className={`w-2 h-2 rounded-full ${dot}`}></div>
+                        <span className={`text-[10px] font-black uppercase tracking-widest ${color}`}>{label}</span>
+                        <span className="text-[9px] text-gray-400 font-bold">({lotes.length})</span>
+                      </div>
+                      {lotes.length === 0 ? (
+                        <div className="text-center py-4 bg-gray-50 rounded-2xl border border-dashed border-gray-200">
+                          <p className="text-[9px] text-gray-400 font-bold">Sin lotes en esta etapa</p>
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {lotes.map(lote => (
+                            <div key={lote.id} className={`${bg} rounded-2xl border border-white p-4 shadow-sm`}>
+                              <div className="flex items-start justify-between">
+                                <div className="flex-1">
+                                  <div className="flex items-center space-x-2 mb-1">
+                                    <FlaskConical size={14} className={color} />
+                                    <span className={`font-black text-sm ${color}`}>{lote.style}</span>
+                                    <span className="font-bold text-xs text-gray-500">{lote.liters}L</span>
+                                  </div>
+                                  {lote.date && <p className="text-[9px] text-gray-400 font-bold">Inicio: {lote.date.split('-').reverse().join('/')}</p>}
+                                  {lote.notes && <p className="text-[10px] text-gray-500 italic mt-0.5">{lote.notes}</p>}
+                                </div>
+                                <div className="flex items-center space-x-1 ml-2">
+                                  {key !== 'madurando' && key !== 'lista' && (
+                                    <button onClick={() => updateProduccionStage(lote.id, 'madurando')}
+                                      className="text-[8px] font-black bg-blue-100 text-blue-600 px-2 py-1 rounded-lg active:scale-90">→ Madura</button>
+                                  )}
+                                  {key === 'madurando' && (
+                                    <button onClick={() => updateProduccionStage(lote.id, 'lista')}
+                                      className="text-[8px] font-black bg-green-100 text-green-700 px-2 py-1 rounded-lg active:scale-90">→ Lista</button>
+                                  )}
+                                  <button onClick={() => removeProduccion(lote.id)}
+                                    className="p-1.5 text-gray-300 hover:text-red-600 transition-colors rounded-lg">
+                                    <Trash2 size={13} />
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </>)}
+
             </div>
           )}
 
@@ -1309,20 +1612,27 @@ export default function App() {
                   <span className="text-[10px] font-black uppercase text-gray-400 tracking-widest">Datos Comerciales</span>
                 </div>
                 <div className="space-y-3">
-                  <input
-                    type="text"
-                    className="w-full bg-gray-50 border border-gray-200 rounded-xl p-3 font-bold text-sm outline-none focus:border-red-600"
-                    value={settings.providerName}
-                    onChange={e => handleSettingsChange({ ...settings, providerName: e.target.value })}
-                    placeholder="Nombre Proveedor"
-                  />
-                  <input
-                    type="text"
-                    className="w-full bg-gray-50 border border-gray-200 rounded-xl p-3 font-bold text-sm outline-none focus:border-red-600"
-                    value={settings.aliasInfo}
-                    onChange={e => handleSettingsChange({ ...settings, aliasInfo: e.target.value })}
-                    placeholder="Datos de Pago (CBU/Alias)"
-                  />
+                  <div>
+                    <label className="text-[8px] font-black uppercase text-gray-400 ml-1 tracking-widest block mb-1">Nombre del Proveedor</label>
+                    <input type="text" className="w-full bg-gray-50 border border-gray-200 rounded-xl p-3 font-bold text-sm outline-none focus:border-red-600"
+                      value={settings.providerName} onChange={e => handleSettingsChange({ ...settings, providerName: e.target.value })} placeholder="Cerveza Brauers" />
+                  </div>
+                  <div className="pt-1">
+                    <label className="text-[8px] font-black uppercase text-gray-400 ml-1 tracking-widest block mb-1">Datos de Transferencia</label>
+                    <div className="space-y-2 bg-gray-50 rounded-2xl p-3 border border-gray-100">
+                      <div className="flex items-center space-x-2">
+                        <ArrowDownToLine size={13} className="text-gray-400 shrink-0" />
+                        <input type="text" className="flex-1 bg-white border border-gray-200 rounded-xl px-3 py-2.5 font-bold text-sm outline-none focus:border-red-500"
+                          value={settings.aliasInfo} onChange={e => handleSettingsChange({ ...settings, aliasInfo: e.target.value })} placeholder="CBU o Alias" />
+                      </div>
+                      <div className="flex items-center space-x-2">
+                        <User size={13} className="text-gray-400 shrink-0" />
+                        <input type="text" className="flex-1 bg-white border border-gray-200 rounded-xl px-3 py-2.5 font-bold text-sm outline-none focus:border-red-500"
+                          value={settings.accountHolder} onChange={e => handleSettingsChange({ ...settings, accountHolder: e.target.value })} placeholder="Titular de la cuenta" />
+                      </div>
+                    </div>
+                    <p className="text-[9px] text-gray-400 mt-1.5 ml-1">Aparece automáticamente en mensajes WPP y remitos PDF.</p>
+                  </div>
                 </div>
               </div>
 
@@ -1741,6 +2051,47 @@ export default function App() {
         </div>
 
       </div>
+
+      {/* MODAL DETALLE BAJADA */}
+      {selectedBajada && (
+        <div className="fixed inset-0 z-[300] flex items-end justify-center p-4 pb-8 no-print"
+          style={{ background: 'rgba(0,0,0,0.88)' }}
+          onClick={() => setSelectedBajada(null)}>
+          <div className="w-full max-w-sm bg-white rounded-[36px] p-6 space-y-5 shadow-2xl animate-in slide-in-from-bottom-6 duration-300"
+            onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <Receipt size={16} className="text-red-600" />
+                <span className="text-[10px] font-black uppercase tracking-widest text-gray-400">Detalle de Bajada</span>
+              </div>
+              <button onClick={() => setSelectedBajada(null)} className="p-1.5 text-gray-300 hover:text-red-500 transition-colors"><X size={18} /></button>
+            </div>
+            <div>
+              <p className="text-2xl font-black tracking-tighter text-gray-900">{selectedBajada.destinationName}</p>
+              <p className="text-sm font-bold text-gray-400 mt-0.5">{selectedBajada.date?.split('-').reverse().join('/')}</p>
+            </div>
+            <div className="divide-y divide-gray-50">
+              {(selectedBajada.items || []).map((item, i) => (
+                <div key={i} className="py-3 flex items-center justify-between">
+                  <div>
+                    <p className="font-black text-sm text-gray-900">{item.kegCode} <span className="text-gray-400 font-bold text-xs">{item.kegCapacity}L</span></p>
+                    <p className="text-[10px] text-red-600 font-black uppercase italic">{item.style}</p>
+                  </div>
+                  <span className="font-black text-sm text-gray-800">${item.price?.toLocaleString('es-AR')}</span>
+                </div>
+              ))}
+            </div>
+            <div className="bg-black text-white rounded-2xl px-5 py-4 flex items-center justify-between">
+              <span className="text-sm font-black uppercase tracking-widest">Total</span>
+              <span className="text-2xl font-black">${selectedBajada.total?.toLocaleString('es-AR')}</span>
+            </div>
+            <button onClick={() => setSelectedBajada(null)}
+              className="w-full py-3 bg-gray-100 text-gray-500 rounded-2xl font-black uppercase text-[10px] tracking-widest active:scale-95">
+              Cerrar
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* MODAL QR */}
       {qrKeg && (
